@@ -435,7 +435,7 @@ void Sf2Instrument::openFile( const QString & _sf2File, bool updateTrackName )
 		emit fileChanged();
 	}
 
-	if( updateTrackName || instrumentTrack()->displayName() == displayName() )
+	if( instrumentTrack()->displayName() == displayName() )
 	{
 		instrumentTrack()->setName( PathUtil::cleanName( _sf2File ) );
 	}
