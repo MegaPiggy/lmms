@@ -61,6 +61,7 @@ SET(LMMS_PLUGIN_LIST
 	GigPlayer
 	ReverbSC
 	Sf2Player
+	SoftVoice
 	Sfxr
 	Sid
 	SlewDistortion
