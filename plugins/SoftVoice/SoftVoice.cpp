@@ -15,6 +15,7 @@
 #include <QScrollArea>
 #include <QSizePolicy>
 #include <QSpinBox>
+#include <QStringList>
 #include <QDir>
 #include <QCoreApplication>
 #include <QProcess>
@@ -26,11 +27,14 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include "AudioEngine.h"
+#include "Engine.h"
 #include "embed.h"
 #include "InstrumentTrack.h"
 #include "LmmsCommonMacros.h"
 #include "NotePlayHandle.h"
 #include "SampleCache.h"
+#include "SamplePlayHandle.h"
 #include "PathUtil.h"
 #include "plugin_export.h"
 
@@ -50,7 +54,11 @@ Plugin::Descriptor PLUGIN_EXPORT softvoice_plugin_descriptor = {
 };
 }
 
-SoftVoice::SoftVoice(InstrumentTrack* track) : Instrument(track, &softvoice_plugin_descriptor) {}
+SoftVoice::SoftVoice(InstrumentTrack* track) : Instrument(track, &softvoice_plugin_descriptor)
+{
+    rate = 50;
+    pitch = 50;
+}
 
 void SoftVoice::playNote(NotePlayHandle* note, SampleFrame* buffer)
 {
@@ -82,8 +90,8 @@ void SoftVoice::saveSettings(QDomDocument&, QDomElement& parent)
     parent.setAttribute("personality", static_cast<int>(personality));
     parent.setAttribute("style", static_cast<int>(style));
     parent.setAttribute("mode", static_cast<int>(mode));
-    parent.setAttribute("rate", rate);
-    parent.setAttribute("pitch", pitch);
+    parent.setAttribute("relativeRate", rate);
+    parent.setAttribute("relativePitch", pitch);
     parent.setAttribute("wav", wavPath);
 }
 
@@ -93,8 +101,8 @@ void SoftVoice::loadSettings(const QDomElement& element)
     personality = static_cast<SpeechPersonality>(element.attribute("personality", "4").toInt());
     style = static_cast<SpeechStyle>(element.attribute("style", "2").toInt());
     mode = static_cast<SpeechVoicingMode>(element.attribute("mode", "0").toInt());
-    rate = element.attribute("rate", "138").toInt();
-    pitch = element.attribute("pitch", "65").toInt();
+    rate = qBound(0, element.attribute("relativeRate", "50").toInt(), 100);
+    pitch = qBound(0, element.attribute("relativePitch", "50").toInt(), 100);
     const auto path = element.attribute("wav");
     if (!path.isEmpty()) { setSample(path); }
 }
@@ -139,7 +147,8 @@ bool SoftVoice::importSpeech(const QString& path, QString* error)
     SpeechPersonality newPersonality = personality;
     SpeechStyle newStyle = style;
     SpeechVoicingMode newMode = mode;
-    int newPitch = pitch, newRate = rate;
+    int newPitch = 50;
+    int newRate = 50;
     QTextStream stream(&file);
     while (!stream.atEnd())
     {
@@ -161,8 +170,8 @@ bool SoftVoice::importSpeech(const QString& path, QString* error)
         if (!ok) { continue; }
         if (key == "Personality") { newPersonality = static_cast<SpeechPersonality>(number); }
         else if (key == "Style") { newStyle = static_cast<SpeechStyle>(number); }
-        else if (key == "Pitch") { newPitch = number; }
-        else if (key == "Rate") { newRate = number; }
+        else if (key == "RelativePitch") { newPitch = qBound(0, number, 100); }
+        else if (key == "RelativeRate") { newRate = qBound(0, number, 100); }
         else if (key == "VoicingMode") { newMode = static_cast<SpeechVoicingMode>(number); }
     }
     if (!foundSettings)
@@ -179,7 +188,7 @@ bool SoftVoice::importSpeech(const QString& path, QString* error)
     return true;
 }
 
-// Synthesize off the audio thread using a separate 64-bit helper process.
+// Generate speech with the standalone Windows renderer.
 bool SoftVoice::synthesize(QString* error)
 {
 #ifndef Q_OS_WIN
@@ -191,21 +200,38 @@ bool SoftVoice::synthesize(QString* error)
         if (error) { *error = tr("Enter some text first."); }
         return false;
     }
-    const QString applicationDir = QCoreApplication::applicationDirPath();
-    const QString executable = qEnvironmentVariable("SOFTVOICE_HOST_EXE",
-        applicationDir + "/softvoice-host.exe");
-    if (!QFileInfo::exists(executable))
+    const QStringList voiceNames = {
+        "Male", "Female", "Large Male", "Child", "Giant Male", "Mellow Female",
+        "Mellow Male", "Crisp Male", "The Fly", "Robotoid", "Martian", "Colossus",
+        "Fast Fred", "Old Woman", "Munchkin", "Troll", "Nerd", "Milktoast",
+        "Tipsy", "Choir Boy"
+    };
+    const int voice = static_cast<int>(personality);
+    if (voice < 0 || voice >= voiceNames.size())
     {
-        if (error) { *error = tr("Cannot find softvoice-host.exe at %1.").arg(executable); }
+        if (error) { *error = tr("Choose a SoftVoice personality."); }
         return false;
     }
-    const QString engineDir = qEnvironmentVariable("SOFTVOICE_ENGINE_DIR", applicationDir);
-    const QDir engineFolder(engineDir);
-    if (engineDir.isEmpty() || !QFileInfo(engineFolder.filePath("svctl64.dll")).isFile()
-        || !QFileInfo(engineFolder.filePath("sveng64.dll")).isFile())
+    const int intonation = static_cast<int>(style);
+    if (intonation != 0 && intonation != 2 && intonation != 4)
     {
-        if (error) { *error = tr("Cannot find svctl64.dll and sveng64.dll in %1.").arg(engineDir); }
+        if (error) { *error = tr("Choose Natural, Monotone, or Expressive for this renderer."); }
         return false;
+    }
+
+    const QDir rendererDir(QCoreApplication::applicationDirPath() + "/softvoice-renderer");
+    const QString executable = rendererDir.filePath("sv_render.exe");
+    const QStringList requiredFiles = {
+        "sv_render.exe", "svwebspeak-host.exe", "SVctl32.DLL", "SVENG32.DLL", "Svspan32.dll"
+    };
+    for (const auto& filename : requiredFiles)
+    {
+        const QString path = rendererDir.filePath(filename);
+        if (!QFileInfo(path).isFile())
+        {
+            if (error) { *error = tr("Missing bundled SoftVoice file %1").arg(QDir::toNativeSeparators(path)); }
+            return false;
+        }
     }
     const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
         + "/softvoice-samples";
@@ -215,42 +241,61 @@ bool SoftVoice::synthesize(QString* error)
         return false;
     }
     const QString resultPath = dir + "/" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".wav";
-    const QStringList arguments = {engineDir, resultPath,
-        QString::number(static_cast<int>(personality)),
-        QString::number(static_cast<int>(style)),
-        QString::number(static_cast<int>(mode)),
-        QString::number(rate), QString::number(pitch), text};
+    const QStringList arguments = {
+        "--voice", QStringLiteral("SoftVoice ") + voiceNames.at(voice),
+        "--intonation", QString::number(intonation),
+        "--voicing", QString::number(static_cast<int>(mode)),
+        "--rate", QString::number(rate),
+        "--pitch", QString::number(pitch),
+        "--sample-rate", "22050",
+        "--text", text,
+        "--out", QDir::toNativeSeparators(resultPath)
+    };
     QProcess process;
     process.setProgram(executable);
+    process.setWorkingDirectory(rendererDir.absolutePath());
+    process.setProcessChannelMode(QProcess::MergedChannels);
     process.setArguments(arguments);
     process.start();
     if (!process.waitForStarted(5000))
     {
-        if (error) { *error = tr("Cannot start the SoftVoice helper: %1").arg(process.errorString()); }
+        if (error) { *error = tr("Cannot start the SoftVoice renderer: %1").arg(process.errorString()); }
         return false;
     }
     if (!process.waitForFinished(20000))
     {
         process.kill();
         process.waitForFinished();
+        QFile::remove(resultPath);
         if (error) { *error = tr("SoftVoice synthesis timed out."); }
         return false;
     }
     if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
     {
-        const auto details = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
+        const auto details = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+        QFile::remove(resultPath);
         if (error)
         {
-            *error = details.isEmpty()
-                ? tr("SoftVoice helper stopped (exit code %1).").arg(process.exitCode())
-                : tr("SoftVoice failed: %1").arg(details);
+            *error = tr("SoftVoice renderer failed (exit code %1).").arg(process.exitCode());
+            if (!details.isEmpty())
+            {
+                *error += '\n' + details;
+            }
+            *error += '\n' + tr("Renderer logs are in %LOCALAPPDATA%\\SoftVoice SAPI5\\Logs.");
         }
         return false;
     }
-    if (!setSample(resultPath))
+    if (QFileInfo(resultPath).size() <= 44 || !setSample(resultPath))
     {
+        QFile::remove(resultPath);
         if (error) { *error = tr("SoftVoice generated audio, but LMMS couldn't load the WAV."); }
         return false;
+    }
+
+    auto* preview = new SamplePlayHandle(new Sample(m_sample));
+    if (!Engine::audioEngine()->addPlayHandle(preview) && error)
+    {
+        *error = tr("Speech loaded. The audio engine was too busy to play the preview.");
     }
     return true;
 #endif
@@ -267,8 +312,8 @@ bool SoftVoice::exportSpeech(const QString& path, QString* error) const
     QTextStream stream(&file);
     stream << "[Speaker Settings]\nStyle=" << static_cast<int>(style)
         << "\nPersonality=" << static_cast<int>(personality)
-        << "\nPitch=" << pitch
-        << "\nRate=" << rate
+        << "\nRelativePitch=" << pitch
+        << "\nRelativeRate=" << rate
         << "\nVoicingMode=" << static_cast<int>(mode)
         << "\nText=" << text << '\n';
     return stream.status() == QTextStream::Ok;
@@ -358,16 +403,17 @@ SoftVoiceView::SoftVoiceView(Instrument* instrument, QWidget* parent)
         });
 
     auto* rate = new QSpinBox(content);
-    rate->setRange(1, 1000);
+    rate->setRange(0, 100);
     rate->setValue(m_instrument->rate);
-    form->addRow(tr("Rate (WPM)"), rate);
+    rate->setToolTip(tr("50 uses the selected voice's preset rate."));
+    form->addRow(tr("Rate"), rate);
     QObject::connect(rate, QOverload<int>::of(&QSpinBox::valueChanged), this,
         [this](int value) { m_instrument->rate = value; });
 
     auto* pitch = new QSpinBox(content);
-    pitch->setRange(1, 20000);
+    pitch->setRange(0, 100);
     pitch->setValue(m_instrument->pitch);
-    pitch->setSuffix(" Hz");
+    pitch->setToolTip(tr("50 uses the selected voice's preset pitch."));
     form->addRow(tr("Pitch"), pitch);
     QObject::connect(pitch, QOverload<int>::of(&QSpinBox::valueChanged), this,
         [this](int value) { m_instrument->pitch = value; });
@@ -396,7 +442,7 @@ SoftVoiceView::SoftVoiceView(Instrument* instrument, QWidget* parent)
         status->setText(tr("Rendering speech..."));
         QString error;
         const bool ok = m_instrument->synthesize(&error);
-        status->setText(ok ? tr("SoftVoice speech generated and loaded into LMMS.") : error);
+        status->setText(ok && error.isEmpty() ? tr("Speech loaded and previewing.") : error);
         generate->setEnabled(true);
     });
     QObject::connect(loadPreset, &QPushButton::clicked, this, [this, textEdit, personality, style, mode, rate, pitch, status]() {

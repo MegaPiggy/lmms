@@ -69,8 +69,8 @@ public:
     SpeechPersonality personality = SpeechPersonality::GiantMale;
     SpeechStyle style = SpeechStyle::Monotone;
     SpeechVoicingMode mode = SpeechVoicingMode::Normal;
-    int rate = 138;
-    int pitch = 65;
+    int rate = 50;
+    int pitch = 50;
     QString wavPath;
 
 private:
